@@ -590,3 +590,64 @@ func FetchCertificates(urlRoot string, rootCaPool *x509.CertPool) []*x509.Certif
 
 	return nil
 }
+
+func FetchCertificates_with_error_spot(urlRoot string, rootCaPool *x509.CertPool) ([]*x509.Certificate, string) {
+	ctrlUrl, err := url.Parse(urlRoot)
+
+	if err != nil {
+		pfxlog.Logger().Errorf("could not parse url root: %s", err)
+		return nil, "one" //@todo figure out what the impact is here of returning an error on other callers
+	}
+
+	path := rest_client_api_client.DefaultBasePath
+
+	if ctrlUrl.Path != "" && ctrlUrl.Path != "/" {
+		path = ctrlUrl.Path
+	}
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: rootCaPool},
+			Proxy:           http.ProxyFromEnvironment,
+		},
+	}
+
+	clientRuntime := httptransport.NewWithClient(ctrlUrl.Host, path, rest_client_api_client.DefaultSchemes, httpClient)
+	clientRuntime.Consumers["application/pkcs7-mime"] = runtime.ConsumerFunc(func(reader io.Reader, i interface{}) error {
+		out := i.(*string)
+
+		buff, err := io.ReadAll(reader)
+
+		if err != nil {
+			return err
+		}
+
+		*out = string(buff)
+
+		return nil
+	})
+	client := rest_client_api_client.New(clientRuntime, nil)
+
+	resp, err := client.WellKnown.ListWellKnownCas(well_known.NewListWellKnownCasParams())
+
+	if err != nil {
+		return nil, "two " + err.Error()
+	}
+
+	if resp.Payload == "" {
+		pfxlog.Logger().Debug("no certificates returned from well know ca store")
+		return nil, "three"
+	}
+
+	pkcs7Certs, _ := base64.StdEncoding.DecodeString(string(resp.Payload))
+	if pkcs7Certs != nil {
+		certs, parseErr := pkcs7.Parse(pkcs7Certs)
+		if parseErr != nil {
+			pfxlog.Logger().Warnf("could not parse certificates. no certificates added from %s", urlRoot)
+			return nil, "four"
+		}
+		return certs.Certificates, "win"
+	}
+
+	return nil, "five"
+}
